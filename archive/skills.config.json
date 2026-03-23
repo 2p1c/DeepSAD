@@ -1,0 +1,83 @@
+{
+  "agents": ["claude-code", "github-copilot", "antigravity"],
+  "skills": [
+    {
+      "name": "frontend-design",
+      "source": "anthropics/skills",
+      "enabled": false,
+      "description": "高质量前端 UI 组件设计"
+    },
+    {
+      "name": "pdf",
+      "source": "vercel-labs/agent-skills",
+      "enabled": false,
+      "description": "PDF 文件读取、合并、生成"
+    },
+    {
+      "name": "docx",
+      "source": "vercel-labs/agent-skills",
+      "enabled": false,
+      "description": "Word 文档生成与编辑"
+    },
+    {
+      "name": "pptx",
+      "source": "vercel-labs/agent-skills",
+      "enabled": false,
+      "description": "PowerPoint 演示文稿生成"
+    },
+    {
+      "name": "xlsx",
+      "source": "vercel-labs/agent-skills",
+      "enabled": false,
+      "description": "Excel 表格处理"
+    },
+    {
+      "name": "skill-creator",
+      "source": "anthropics/skills",
+      "enabled": true,
+      "description": "创建和优化自定义 Skill"
+    },
+    {
+      "name": "find-skills",
+      "source": "vercel-labs/skills",
+      "enabled": true,
+      "description": "查找和管理已安装的 Skill"
+    },
+    {
+      "name": "git-flow-branch-creator",
+      "source": "github/awesome-copilot",
+      "enabled": true,
+      "description": "创建 Git Flow 分支"
+    },
+    {
+      "name": "git-commit",
+      "source": "github/awesome-copilot",
+      "enabled": true,
+      "description": "根据当前修改自动总结 git commit message 并提交"
+    },
+    {
+      "name": "gws-gmail",
+      "source": "googleworkspace/cli",
+      "enabled": true,
+      "description": "Gmail 邮件管理，支持发送、查询、过滤和监听新邮件"
+    },
+    {
+      "name": "nsfc-abstract",
+      "source": "huangwb8/chineseresearchlatex",
+      "enabled": false,
+      "description": "基金申请书摘要优化与生成"
+    },
+    {
+      "name": "chinese-style-guide",
+      "source": "paperclipai/paperclip",
+      "enabled": false,
+      "description": "中文写作风格检查与学术表达优化"
+    },
+    {
+      "name": "abstract-strategy",
+      "source": "paperclipai/paperclip",
+      "enabled": false,
+      "description": "论文摘要写作策略与逻辑优化"
+    }
+  ]
+}
