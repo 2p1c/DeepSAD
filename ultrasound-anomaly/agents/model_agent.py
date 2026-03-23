@@ -1,4 +1,4 @@
-"""Model Agent: 1D encoder + Deep SVDD training and inference score."""
+"""Model Agent: 1D encoder + optional feature late fusion + Deep SVDD."""
 
 from __future__ import annotations
 
@@ -19,28 +19,55 @@ class DeepSVDDAgent(nn.Module):
         window_size: int,
         embedding_dim: int = 128,
         hidden_channels: int | Iterable[int] = 32,
+        fusion_enabled: bool = False,
+        fusion_feat_dim: int = 7,
+        fusion_feat_hidden_dim: int = 32,
+        fusion_dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.window_size = int(window_size)
         self.embedding_dim = int(embedding_dim)
         self.hidden_channels = hidden_channels if isinstance(hidden_channels, int) else tuple(hidden_channels)
+        self.fusion_enabled = bool(fusion_enabled)
+        self.fusion_feat_dim = int(fusion_feat_dim)
+        self.fusion_feat_hidden_dim = int(fusion_feat_hidden_dim)
         self.encoder = Conv1dEncoder(
             window_size=self.window_size,
             embedding_dim=self.embedding_dim,
             hidden_channels=hidden_channels,
         )
+        if self.fusion_enabled:
+            if self.fusion_feat_dim <= 0 or self.fusion_feat_hidden_dim <= 0:
+                raise ValueError("fusion_feat_dim and fusion_feat_hidden_dim must be positive when fusion is enabled")
+            self.feature_mlp = nn.Sequential(
+                nn.Linear(self.fusion_feat_dim, self.fusion_feat_hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.fusion_feat_hidden_dim, self.embedding_dim),
+                nn.LayerNorm(self.embedding_dim),
+            )
+            self.fusion_projection = nn.Sequential(
+                nn.Linear(self.embedding_dim * 2, self.embedding_dim),
+                nn.Dropout(p=float(fusion_dropout)),
+                nn.LayerNorm(self.embedding_dim),
+            )
         self.register_buffer("center_c", torch.zeros(self.embedding_dim))
 
     @staticmethod
-    def _extract_inputs(batch: Any) -> torch.Tensor:
+    def _extract_inputs(batch: Any) -> tuple[torch.Tensor, torch.Tensor | None]:
+        x = None
+        aux = None
         if torch.is_tensor(batch):
             x = batch
         elif isinstance(batch, dict):
-            preferred_keys = ("x", "input", "inputs", "signal", "window", "series", "data")
-            x = None
-            for key in preferred_keys:
+            x_keys = ("x", "input", "inputs", "signal", "window", "series", "data")
+            aux_keys = ("feat_vec", "aux", "features")
+            for key in x_keys:
                 if key in batch:
                     x = batch[key]
+                    break
+            for key in aux_keys:
+                if key in batch:
+                    aux = batch[key]
                     break
             if x is None:
                 x = next(iter(batch.values()))
@@ -48,12 +75,15 @@ class DeepSVDDAgent(nn.Module):
             if not batch:
                 raise ValueError("empty batch received from dataloader")
             x = batch[0]
+            aux = batch[1] if len(batch) > 1 else None
         else:
             x = batch
 
         if not torch.is_tensor(x):
             x = torch.as_tensor(x)
-        return x
+        if aux is not None and not torch.is_tensor(aux):
+            aux = torch.as_tensor(aux)
+        return x, aux
 
     @staticmethod
     def _format_input(x: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -66,9 +96,40 @@ class DeepSVDDAgent(nn.Module):
             raise ValueError(f"expected input shape [B, 1, W], got {tuple(x.shape)}")
         return x
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _format_feat_vec(
+        feat_vec: torch.Tensor | None,
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if feat_vec is None:
+            return None
+        feat_vec = feat_vec.to(device=device, dtype=torch.float32)
+        if feat_vec.ndim != 2:
+            raise ValueError(f"expected feature vector shape [B, F], got {tuple(feat_vec.shape)}")
+        if feat_vec.shape[0] != batch_size:
+            raise ValueError(
+                f"feature batch size must match input batch size: {feat_vec.shape[0]} != {batch_size}"
+            )
+        return feat_vec
+
+    def forward(self, x: torch.Tensor, feat_vec: torch.Tensor | None = None) -> torch.Tensor:
         x = self._format_input(x, next(self.parameters()).device)
-        return self.encoder(x)
+        z_cnn = self.encoder(x)
+        if not self.fusion_enabled:
+            return z_cnn
+
+        feat_vec = self._format_feat_vec(feat_vec, batch_size=x.shape[0], device=x.device)
+        if feat_vec is None:
+            raise ValueError("fusion is enabled but feat_vec was not provided")
+        if feat_vec.shape[1] != self.fusion_feat_dim:
+            raise ValueError(
+                f"feature dimension mismatch: expected {self.fusion_feat_dim}, got {feat_vec.shape[1]}"
+            )
+
+        z_feat = self.feature_mlp(feat_vec)
+        z_cat = torch.cat([z_cnn, z_feat], dim=1)
+        return self.fusion_projection(z_cat)
 
     def init_center_c(self, dataloader: Any, device: torch.device) -> torch.Tensor:
         """Initialize the hypersphere center from healthy training data."""
@@ -83,8 +144,10 @@ class DeepSVDDAgent(nn.Module):
         n_samples = 0
         with torch.no_grad():
             for batch in dataloader:
-                x = self._format_input(self._extract_inputs(batch), device)
-                z = self.encoder(x)
+                x, feat_vec = self._extract_inputs(batch)
+                x = self._format_input(x, device)
+                feat_vec = self._format_feat_vec(feat_vec, batch_size=x.shape[0], device=device)
+                z = self.forward(x, feat_vec=feat_vec)
                 batch_size = z.shape[0]
                 c += z.sum(dim=0)
                 n_samples += batch_size
@@ -103,15 +166,15 @@ class DeepSVDDAgent(nn.Module):
         self.train(was_training)
         return self.center_c.detach().clone()
 
-    def loss(self, x: torch.Tensor) -> torch.Tensor:
-        z = self.forward(x)
+    def loss(self, x: torch.Tensor, feat_vec: torch.Tensor | None = None) -> torch.Tensor:
+        z = self.forward(x, feat_vec=feat_vec)
         c = self.center_c.to(device=z.device, dtype=z.dtype)
         return torch.mean(torch.sum((z - c) ** 2, dim=1))
 
-    def score_samples(self, x: torch.Tensor) -> np.ndarray:
+    def score_samples(self, x: torch.Tensor, feat_vec: torch.Tensor | None = None) -> np.ndarray:
         self.eval()
         with torch.no_grad():
-            z = self.forward(x)
+            z = self.forward(x, feat_vec=feat_vec)
             c = self.center_c.to(device=z.device, dtype=z.dtype)
             scores = torch.sum((z - c) ** 2, dim=1)
         return scores.detach().cpu().numpy()
@@ -130,7 +193,7 @@ class DeepSVDDAgent(nn.Module):
         self.init_center_c(train_loader, device)
 
         optimizer = torch.optim.Adam(
-            self.encoder.parameters(),
+            self.parameters(),
             lr=lr,
             weight_decay=weight_decay,
         )
@@ -144,9 +207,11 @@ class DeepSVDDAgent(nn.Module):
             num_batches = 0
 
             for batch in train_loader:
-                x = self._format_input(self._extract_inputs(batch), device)
+                x, feat_vec = self._extract_inputs(batch)
+                x = self._format_input(x, device)
+                feat_vec = self._format_feat_vec(feat_vec, batch_size=x.shape[0], device=device)
                 optimizer.zero_grad(set_to_none=True)
-                z = self.encoder(x)
+                z = self.forward(x, feat_vec=feat_vec)
                 c = self.center_c.to(device=z.device, dtype=z.dtype)
                 loss = torch.mean(torch.sum((z - c) ** 2, dim=1))
                 loss.backward()

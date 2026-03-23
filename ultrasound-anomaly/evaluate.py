@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -70,6 +71,10 @@ def main() -> None:
         window_size=cfg.data.window_size,
         embedding_dim=cfg.model.embedding_dim,
         hidden_channels=cfg.model.hidden_channels,
+        fusion_enabled=cfg.fusion.enabled and cfg.fusion.mode == "late",
+        fusion_feat_dim=cfg.fusion.feat_dim,
+        fusion_feat_hidden_dim=cfg.fusion.feat_hidden_dim,
+        fusion_dropout=cfg.fusion.dropout,
     )
     try:
         model.load_state_dict(checkpoint["model_state_dict"], strict=True)
@@ -98,15 +103,20 @@ def main() -> None:
             "No test samples found. Please provide both data.test_healthy_paths and data.test_damaged_paths."
         )
 
-    x_test, y_test, path_ids = data_agent.to_arrays(test_samples)
+    test_batch = data_agent.to_batch(test_samples)
+    x_test = np.asarray(test_batch["x"], dtype=np.float32)
+    feat_test = np.asarray(test_batch["feat_vec"], dtype=np.float32)
+    y_test = np.asarray(test_batch["y"], dtype=np.int64)
+    path_ids = test_batch["path_ids"]
 
     device = torch.device(cfg.train.device)
     model = model.to(device)
     x_tensor = torch.from_numpy(x_test).to(device)
+    feat_tensor = torch.from_numpy(feat_test).to(device)
 
     with torch.no_grad():
-        embeddings = model.forward(x_tensor).detach().cpu().numpy()
-    scores = model.score_samples(x_tensor)
+        embeddings = model.forward(x_tensor, feat_vec=feat_tensor).detach().cpu().numpy()
+    scores = model.score_samples(x_tensor, feat_vec=feat_tensor)
 
     evaluator = EvaluationAgent()
     window_metrics = evaluator.evaluate_window_level(y_test, scores)
@@ -135,6 +145,7 @@ def main() -> None:
         "checkpoint_path": str(checkpoint_path),
         "results_dir": str(results_dir),
         "data_source": "filesystem",
+        "config": asdict(cfg),
         "window_level": {
             "auc": float(window_metrics["auc"]),
             "fpr": window_metrics["fpr"],

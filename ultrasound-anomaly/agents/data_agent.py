@@ -9,7 +9,11 @@ from typing import Dict, List, Sequence
 import numpy as np
 from scipy.io import loadmat
 
-from utils.preprocessing import extract_windows_from_signal
+from utils.preprocessing import (
+    FEATURE_VECTOR_DIM,
+    extract_window_feature_vector,
+    extract_windows_from_signal,
+)
 
 
 @dataclass(slots=True)
@@ -21,6 +25,7 @@ class WindowSample:
     path_id: str
     source: str
     index: int
+    feat_vec: np.ndarray | None = None
 
 
 class UltrasoundDataAgent:
@@ -124,18 +129,25 @@ class UltrasoundDataAgent:
         for path in paths:
             path_obj = Path(path)
             signal = self.load_signal_file(path_obj)
-            windows = extract_windows_from_signal(
+            windows, feat_vecs = extract_windows_from_signal(
                 signal,
                 window_size=self.window_size,
                 stride=self.stride,
                 normalization=self.normalization,
+                return_features=True,
             )
+            if feat_vecs.shape[0] != windows.shape[0]:
+                raise ValueError(
+                    "Feature extraction returned a different number of vectors "
+                    f"than windows for {path_obj}: {feat_vecs.shape[0]} != {windows.shape[0]}."
+                )
             path_id = self._path_id(path_obj)
             source = self._source_from_path(path_obj)
             for index, window in enumerate(windows):
                 samples.append(
                     WindowSample(
                         window=np.asarray(window, dtype=np.float32),
+                        feat_vec=np.asarray(feat_vecs[index], dtype=np.float32),
                         label=int(label),
                         path_id=path_id,
                         source=source,
@@ -201,3 +213,69 @@ class UltrasoundDataAgent:
         x = np.stack(windows, axis=0).astype(np.float32, copy=False)[:, None, :]
         y = np.asarray(labels, dtype=np.int64)
         return x, y, path_ids
+
+    @staticmethod
+    def to_batch(samples: Sequence[WindowSample]) -> dict[str, np.ndarray | List[str]]:
+        """
+        Convert samples to a model-agnostic batch payload.
+
+        The default model path still consumes only ``x``; ``feat_vec`` is
+        carried alongside it so downstream code can opt in without changing the
+        existing pipeline.
+        """
+        if len(samples) == 0:
+            return {
+                "x": np.empty((0, 1, 0), dtype=np.float32),
+                "feat_vec": np.empty((0, FEATURE_VECTOR_DIM), dtype=np.float32),
+                "y": np.empty((0,), dtype=np.int64),
+                "path_ids": [],
+            }
+
+        windows = []
+        feat_vecs = []
+        labels = []
+        path_ids: List[str] = []
+        expected_shape = None
+        for sample in samples:
+            window = np.asarray(sample.window, dtype=np.float32)
+            if window.ndim != 1:
+                raise ValueError(
+                    f"Each sample.window must be 1D, got shape {window.shape} for {sample.path_id}."
+                )
+            if expected_shape is None:
+                expected_shape = window.shape[0]
+            elif window.shape[0] != expected_shape:
+                raise ValueError(
+                    "All windows must have the same length to build a batch. "
+                    f"Expected {expected_shape}, got {window.shape[0]} for {sample.path_id}."
+                )
+
+            feat_vec = sample.feat_vec
+            if feat_vec is None:
+                feat_vec = extract_window_feature_vector(window)
+            else:
+                feat_vec = np.asarray(feat_vec, dtype=np.float32)
+            if feat_vec.ndim != 1:
+                raise ValueError(
+                    f"Each sample.feat_vec must be 1D, got shape {feat_vec.shape} for {sample.path_id}."
+                )
+            if feat_vec.shape[0] != FEATURE_VECTOR_DIM:
+                raise ValueError(
+                    "Unexpected feature vector length. "
+                    f"Expected {FEATURE_VECTOR_DIM}, got {feat_vec.shape[0]} for {sample.path_id}."
+                )
+
+            windows.append(window)
+            feat_vecs.append(feat_vec)
+            labels.append(int(sample.label))
+            path_ids.append(sample.path_id)
+
+        x = np.stack(windows, axis=0).astype(np.float32, copy=False)[:, None, :]
+        feat_vec = np.stack(feat_vecs, axis=0).astype(np.float32, copy=False)
+        y = np.asarray(labels, dtype=np.int64)
+        return {
+            "x": x,
+            "feat_vec": feat_vec,
+            "y": y,
+            "path_ids": path_ids,
+        }

@@ -43,6 +43,16 @@ class ModelConfig:
 
 
 @dataclass
+class FusionConfig:
+    enabled: bool = False
+    mode: str = "late"
+    sources: list[str] = field(default_factory=lambda: ["time"])
+    feat_dim: int = 7
+    feat_hidden_dim: int = 32
+    dropout: float = 0.0
+
+
+@dataclass
 class TrainConfig:
     batch_size: int = 64
     epochs: int = 50
@@ -72,6 +82,7 @@ class PipelineConfig:
     seed: int = 42
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
+    fusion: FusionConfig = field(default_factory=FusionConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
@@ -89,6 +100,7 @@ class PipelineConfig:
 
         data = DataConfig(**(payload.get("data") or {}))
         model = ModelConfig(**(payload.get("model") or {}))
+        fusion = FusionConfig(**(payload.get("fusion") or {}))
         train = TrainConfig(**(payload.get("train") or {}))
         eval_cfg = EvalConfig(**(payload.get("eval") or {}))
         output = OutputConfig(**(payload.get("output") or {}))
@@ -98,6 +110,7 @@ class PipelineConfig:
             seed=int(payload.get("seed", 42)),
             data=data,
             model=model,
+            fusion=fusion,
             train=train,
             eval=eval_cfg,
             output=output,
@@ -114,6 +127,12 @@ class PipelineConfig:
             raise ValueError("data.window_size and data.stride must be positive.")
         if self.train.batch_size <= 0 or self.train.epochs <= 0:
             raise ValueError("train.batch_size and train.epochs must be positive.")
+        if self.fusion.mode not in {"late", "mid", "gated", "early"}:
+            raise ValueError("fusion.mode must be one of {'late', 'mid', 'gated', 'early'}.")
+        if self.fusion.feat_dim <= 0 or self.fusion.feat_hidden_dim <= 0:
+            raise ValueError("fusion.feat_dim and fusion.feat_hidden_dim must be positive.")
+        if self.fusion.dropout < 0.0 or self.fusion.dropout >= 1.0:
+            raise ValueError("fusion.dropout must be in [0, 1).")
 
 
 class PipelineAgent:
@@ -152,9 +171,11 @@ class PipelineAgent:
                 "No training samples were built. Please provide data.train_healthy_paths in configs/config.yaml."
             )
 
-        x_train, _, _ = data_agent.to_arrays(train_samples)
+        train_batch = data_agent.to_batch(train_samples)
+        x_train = np.asarray(train_batch["x"], dtype=np.float32)
+        feat_train = np.asarray(train_batch["feat_vec"], dtype=np.float32)
         train_loader = DataLoader(
-            TensorDataset(torch.from_numpy(x_train)),
+            TensorDataset(torch.from_numpy(x_train), torch.from_numpy(feat_train)),
             batch_size=cfg.train.batch_size,
             shuffle=True,
             drop_last=False,
@@ -164,6 +185,10 @@ class PipelineAgent:
             window_size=cfg.data.window_size,
             embedding_dim=cfg.model.embedding_dim,
             hidden_channels=cfg.model.hidden_channels,
+            fusion_enabled=cfg.fusion.enabled and cfg.fusion.mode == "late",
+            fusion_feat_dim=cfg.fusion.feat_dim,
+            fusion_feat_hidden_dim=cfg.fusion.feat_hidden_dim,
+            fusion_dropout=cfg.fusion.dropout,
         )
         history = model.fit(
             train_loader=train_loader,
@@ -210,8 +235,15 @@ class PipelineAgent:
         }
 
         if test_samples:
-            x_test, y_test, test_path_ids = data_agent.to_arrays(test_samples)
-            test_scores = model.score_samples(torch.from_numpy(x_test))
+            test_batch = data_agent.to_batch(test_samples)
+            x_test = np.asarray(test_batch["x"], dtype=np.float32)
+            feat_test = np.asarray(test_batch["feat_vec"], dtype=np.float32)
+            y_test = np.asarray(test_batch["y"], dtype=np.int64)
+            test_path_ids = test_batch["path_ids"]
+            test_scores = model.score_samples(
+                torch.from_numpy(x_test),
+                feat_vec=torch.from_numpy(feat_test),
+            )
             evaluator = EvaluationAgent()
             window_metrics = evaluator.evaluate_window_level(y_test, test_scores)
             path_metrics = evaluator.evaluate_path_level(
