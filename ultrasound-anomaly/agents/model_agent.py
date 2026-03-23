@@ -95,7 +95,7 @@ class DeepSVDDAgent(nn.Module):
         c /= float(n_samples)
 
         # Avoid collapse by keeping any near-zero component away from exact zero.
-        eps = torch.tensor(0.1, device=device, dtype=c.dtype)
+        eps = torch.tensor(1e-6, device=device, dtype=c.dtype)
         near_zero = c.abs() < eps
         c = torch.where(near_zero, torch.where(c >= 0, eps, -eps), c)
 

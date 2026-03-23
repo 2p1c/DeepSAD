@@ -9,7 +9,7 @@ from torch import nn
 
 
 class Conv1dEncoder(nn.Module):
-    """Lightweight 1D CNN encoder for Deep SVDD."""
+    """1D CNN encoder focused on damage-sensitive guided-wave representation."""
 
     def __init__(
         self,
@@ -38,21 +38,32 @@ class Conv1dEncoder(nn.Module):
             if any(ch <= 0 for ch in channels):
                 raise ValueError("hidden_channels values must be positive")
 
+        if len(channels) not in {3, 4}:
+            raise ValueError("hidden_channels length must be 3 (MVP) or 4 (full recommended).")
+
+        if len(channels) == 4:
+            kernel_sizes = [7, 5, 5, 3]
+            strides = [1, 2, 2, 2]
+        else:
+            # MVP: 3 blocks with unified kernel size 5
+            kernel_sizes = [5, 5, 5]
+            strides = [1, 2, 2]
+
         layers: list[nn.Module] = []
         in_channels = 1
-        for idx, out_channels in enumerate(channels):
+        for out_channels, k, s in zip(channels, kernel_sizes, strides):
             layers.append(
                 nn.Conv1d(
                     in_channels=in_channels,
                     out_channels=out_channels,
-                    kernel_size=5,
-                    padding=2,
-                    bias=True,
+                    kernel_size=k,
+                    stride=s,
+                    padding=k // 2,
+                    bias=False,
                 )
             )
+            layers.append(nn.BatchNorm1d(out_channels))
             layers.append(nn.ReLU(inplace=True))
-            if idx < len(channels) - 1:
-                layers.append(nn.MaxPool1d(kernel_size=2, ceil_mode=True))
             in_channels = out_channels
 
         self.window_size = window_size
@@ -60,7 +71,10 @@ class Conv1dEncoder(nn.Module):
         self.hidden_channels = tuple(channels)
         self.features = nn.Sequential(*layers)
         self.global_pool = nn.AdaptiveAvgPool1d(1)
-        self.projection = nn.Linear(in_channels, embedding_dim)
+        self.projection = nn.Sequential(
+            nn.Linear(in_channels, embedding_dim),
+            nn.LayerNorm(embedding_dim),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 3:

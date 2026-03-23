@@ -22,7 +22,7 @@ train:
   batch_size: 64
   epochs: 50
   lr: 0.001
-  weight_decay: 1.0e-6
+  weight_decay: 1.0e-5
   device: cpu
 
 eval:
