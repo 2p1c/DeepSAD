@@ -1,0 +1,37 @@
+project_name: ultrasound-anomaly-mvp
+seed: 42
+
+data:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  train_healthy_paths: []
+  test_healthy_paths: []
+  test_damaged_paths: []
+  window_size: 256
+  stride: 128
+  normalization: zscore  # zscore|minmax
+  split_by: path
+
+model:
+  embedding_dim: 128
+  input_channels: 1
+  hidden_channels: [16, 32, 64]
+  svdd_objective: one-class
+
+train:
+  batch_size: 64
+  epochs: 50
+  lr: 0.001
+  weight_decay: 1.0e-6
+  device: cpu
+
+eval:
+  aggregate: mean  # mean|max|p95
+  plot_score_distribution: true
+  plot_roc: true
+  plot_pca: true
+
+output:
+  logs_dir: logs
+  ckpt_dir: checkpoints
+  results_dir: results
