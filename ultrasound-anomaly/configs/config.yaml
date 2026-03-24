@@ -4,12 +4,15 @@ seed: 42
 data:
   raw_dir: data/raw
   processed_dir: data/processed
-  train_healthy_paths: []
-  test_healthy_paths: []
-  test_damaged_paths: []
+  train_healthy_paths:
+    - 'E:\数据\260324\AL_plate\DeepSAD\PZT\complete\1\1_41_41_120k_620k_Avg10\data.mat'
+  test_healthy_paths:
+    - 'E:\数据\260324\AL_plate\DeepSAD\PZT\complete\2\41_41_Avg10_Filter_same_as_Laser\data.mat'
+  test_damaged_paths:
+    - 'E:\数据\260324\AL_plate\DeepSAD\PZT\damaged\test_damage\data.mat'
   window_size: 256
   stride: 128
-  normalization: zscore  # zscore|minmax
+  normalization:   # zscore|minmax
   split_by: path
 
 model:
@@ -21,7 +24,7 @@ model:
 train:
   batch_size: 64
   epochs: 50
-  lr: 0.001
+  lr: 0.0000001
   weight_decay: 1.0e-5
   device: cpu
 
