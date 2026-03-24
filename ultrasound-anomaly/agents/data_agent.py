@@ -37,6 +37,10 @@ class UltrasoundDataAgent:
         self.window_size = window_size
         self.stride = stride
         self.normalization = normalization
+        # Tiny-amplitude ultrasound (e.g. pm-level) can be numerically fragile.
+        # Rescale raw signals when needed before window extraction.
+        self._min_absmax_for_stability = 1e-6
+        self._target_absmax_after_rescale = 1e-2
 
     @staticmethod
     def _validate_2d_signal(signal: np.ndarray, path: Path) -> np.ndarray:
@@ -113,7 +117,28 @@ class UltrasoundDataAgent:
         else:
             raise ValueError(f"Unsupported file extension for {path_obj}: expected .mat or .npy.")
 
-        return self._validate_2d_signal(signal, path_obj).astype(np.float32, copy=False)
+        validated = self._validate_2d_signal(signal, path_obj).astype(np.float32, copy=False)
+        return self._rescale_if_tiny_amplitude(validated)
+
+    def _rescale_if_tiny_amplitude(self, signal: np.ndarray) -> np.ndarray:
+        """
+        Rescale tiny-amplitude signals to a numerically safer range.
+
+        This preserves waveform shape and relative differences while improving
+        downstream stability for conv/batchnorm stacks when raw amplitudes are
+        extremely small (e.g. pm-level after unit conversion).
+        """
+        if signal.size == 0:
+            return signal
+
+        absmax = float(np.max(np.abs(signal)))
+        if absmax <= 0.0:
+            return signal
+        if absmax >= self._min_absmax_for_stability:
+            return signal
+
+        scale = self._target_absmax_after_rescale / absmax
+        return (signal * np.float32(scale)).astype(np.float32, copy=False)
 
     def build_samples(self, paths: Sequence[str | Path], label: int) -> List[WindowSample]:
         """Generate one WindowSample per extracted window for each input path."""

@@ -69,6 +69,10 @@ class Conv1dEncoder(nn.Module):
         self.window_size = window_size
         self.embedding_dim = embedding_dim
         self.hidden_channels = tuple(channels)
+        # Minimum per-sample dynamic range before the conv stack.
+        # Signals below this range are adaptively up-scaled for stability.
+        self.min_input_absmax = 1e-3
+        self.input_scale_eps = 1e-12
         self.features = nn.Sequential(*layers)
         self.global_pool = nn.AdaptiveAvgPool1d(1)
         self.projection = nn.Sequential(
@@ -83,6 +87,16 @@ class Conv1dEncoder(nn.Module):
             raise ValueError(f"expected channel dimension 1, got {x.shape[1]}")
 
         x = x.float()
+        # Guardrail for tiny-amplitude inputs (e.g. pm-level) to avoid
+        # near-zero activations throughout the backbone.
+        absmax = x.detach().abs().amax(dim=2, keepdim=True)
+        safe_absmax = absmax.clamp_min(self.input_scale_eps)
+        scale = torch.where(
+            absmax < self.min_input_absmax,
+            self.min_input_absmax / safe_absmax,
+            torch.ones_like(safe_absmax),
+        )
+        x = x * scale
         x = self.features(x)
         x = self.global_pool(x).squeeze(-1)
         return self.projection(x)
