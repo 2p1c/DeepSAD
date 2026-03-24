@@ -10,8 +10,8 @@ data:
     - 'E:\数据\260324\AL_plate\DeepSAD\PZT\complete\2\41_41_Avg10_Filter_same_as_Laser\data.mat'
   test_damaged_paths:
     - 'E:\数据\260324\AL_plate\DeepSAD\PZT\damaged\test_damage\data.mat'
-  window_size: 256
-  stride: 128
+  window_size: 1000
+  stride: 1000
   normalization: zscore  # zscore|minmax
   split_by: path
 
@@ -25,7 +25,7 @@ fusion:
   enabled: true
   mode: late  # late|mid|gated|early
   sources: [time]
-  feat_dim: 8
+  feat_dim: 15  # Keep aligned with utils.preprocessing.FEATURE_VECTOR_DIM for late fusion.
   feat_hidden_dim: 32
   dropout: 0.0
 
@@ -35,6 +35,12 @@ train:
   lr: 0.001
   weight_decay: 1.0e-5
   device: cpu
+  var_reg_weight: 0.2
+  target_embedding_std: 0.01
+  var_reg_warmup_epochs: 5
+  collapse_std_threshold: 0.001
+  collapse_patience: 5
+  min_epochs: 10
 
 eval:
   aggregate: mean  # mean|max|p95

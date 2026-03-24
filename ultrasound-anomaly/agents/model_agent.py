@@ -48,8 +48,9 @@ class DeepSVDDAgent(nn.Module):
             self.fusion_projection = nn.Sequential(
                 nn.Linear(self.embedding_dim * 2, self.embedding_dim),
                 nn.Dropout(p=float(fusion_dropout)),
-                nn.LayerNorm(self.embedding_dim),
             )
+            self.fusion_norm = nn.LayerNorm(self.embedding_dim)
+            self.fusion_alpha = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
         self.register_buffer("center_c", torch.zeros(self.embedding_dim))
 
     @staticmethod
@@ -129,7 +130,8 @@ class DeepSVDDAgent(nn.Module):
 
         z_feat = self.feature_mlp(feat_vec)
         z_cat = torch.cat([z_cnn, z_feat], dim=1)
-        return self.fusion_projection(z_cat)
+        fused_delta = self.fusion_projection(z_cat)
+        return self.fusion_norm(z_cnn + self.fusion_alpha * fused_delta)
 
     def init_center_c(self, dataloader: Any, device: torch.device) -> torch.Tensor:
         """Initialize the hypersphere center from healthy training data."""
@@ -187,6 +189,12 @@ class DeepSVDDAgent(nn.Module):
         weight_decay: float,
         device: torch.device,
         log_interval: int = 10,
+        var_reg_weight: float = 0.2,
+        target_embedding_std: float = 0.01,
+        var_reg_warmup_epochs: int = 5,
+        collapse_std_threshold: float = 0.001,
+        collapse_patience: int = 5,
+        min_epochs: int = 10,
     ) -> list[dict[str, float | int]]:
         device = torch.device(device)
         self.to(device)
@@ -200,8 +208,11 @@ class DeepSVDDAgent(nn.Module):
 
         history: list[dict[str, float | int]] = []
         self.train()
+        collapse_counter = 0
         for epoch in range(1, epochs + 1):
             total_loss = 0.0
+            total_svdd_loss = 0.0
+            total_var_penalty = 0.0
             total_samples = 0
             total_embedding_std = 0.0
             num_batches = 0
@@ -213,21 +224,37 @@ class DeepSVDDAgent(nn.Module):
                 optimizer.zero_grad(set_to_none=True)
                 z = self.forward(x, feat_vec=feat_vec)
                 c = self.center_c.to(device=z.device, dtype=z.dtype)
-                loss = torch.mean(torch.sum((z - c) ** 2, dim=1))
+                svdd_loss = torch.mean(torch.sum((z - c) ** 2, dim=1))
+                batch_embedding_std = z.std(dim=0, unbiased=False).mean()
+                std_deficit = torch.relu(
+                    torch.tensor(float(target_embedding_std), device=z.device, dtype=z.dtype)
+                    - batch_embedding_std
+                )
+                var_penalty = std_deficit * std_deficit
+                warmup_scale = 1.0
+                if var_reg_warmup_epochs > 0:
+                    warmup_scale = min(1.0, float(epoch) / float(var_reg_warmup_epochs))
+                loss = svdd_loss + float(var_reg_weight) * warmup_scale * var_penalty
                 loss.backward()
                 optimizer.step()
 
                 batch_size = x.shape[0]
                 total_loss += loss.item() * batch_size
+                total_svdd_loss += svdd_loss.item() * batch_size
+                total_var_penalty += var_penalty.item() * batch_size
                 total_samples += batch_size
-                total_embedding_std += z.detach().std(dim=0, unbiased=False).mean().item()
+                total_embedding_std += batch_embedding_std.detach().item()
                 num_batches += 1
 
             mean_loss = total_loss / max(total_samples, 1)
+            mean_svdd_loss = total_svdd_loss / max(total_samples, 1)
+            mean_var_penalty = total_var_penalty / max(total_samples, 1)
             mean_embedding_std = total_embedding_std / max(num_batches, 1)
             record = {
                 "epoch": epoch,
                 "loss": float(mean_loss),
+                "svdd_loss": float(mean_svdd_loss),
+                "var_penalty": float(mean_var_penalty),
                 "embedding_std": float(mean_embedding_std),
                 "center_norm": float(self.center_c.norm().item()),
                 "lr": float(lr),
@@ -237,8 +264,21 @@ class DeepSVDDAgent(nn.Module):
             if log_interval and (epoch % log_interval == 0 or epoch == epochs):
                 print(
                     f"[DeepSVDDAgent] epoch {epoch}/{epochs} "
-                    f"loss={mean_loss:.6f} embedding_std={mean_embedding_std:.6f}"
+                    f"loss={mean_loss:.6f} svdd={mean_svdd_loss:.6f} "
+                    f"var_pen={mean_var_penalty:.6f} embedding_std={mean_embedding_std:.6f}"
                 )
+
+            if epoch >= int(min_epochs):
+                if mean_embedding_std < float(collapse_std_threshold):
+                    collapse_counter += 1
+                else:
+                    collapse_counter = 0
+                if collapse_counter >= int(collapse_patience):
+                    print(
+                        "[DeepSVDDAgent] Early stop triggered by anti-collapse guard: "
+                        f"embedding_std<{collapse_std_threshold} for {collapse_counter} epochs."
+                    )
+                    break
 
         self.eval()
         return history

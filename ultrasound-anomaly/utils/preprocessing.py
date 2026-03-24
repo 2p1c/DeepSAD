@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Literal
 
 import numpy as np
-from scipy.signal import hilbert
 
 NormalizationMode = Literal["zscore", "minmax", None]
 
@@ -21,6 +20,13 @@ FEATURE_VECTOR_NAMES = (
     "std",
     "crest_factor",
     "rms",
+    "low_band_energy_ratio",
+    "mid_band_energy_ratio",
+    "high_band_energy_ratio",
+    "spectral_centroid",
+    "spectral_bandwidth",
+    "spectral_flatness",
+    "spectral_entropy",
 )
 FEATURE_VECTOR_DIM = len(FEATURE_VECTOR_NAMES)
 
@@ -58,6 +64,28 @@ def sliding_window_1d(signal: np.ndarray, window_size: int, stride: int) -> np.n
     if not windows:
         return np.empty((0, window_size), dtype=np.float32)
     return np.stack(windows, axis=0).astype(np.float32, copy=False)
+
+
+def _analytic_signal(signal: np.ndarray) -> np.ndarray:
+    """Compute the analytic signal with an FFT Hilbert transform."""
+    n = signal.size
+    spectrum = np.fft.fft(signal)
+    h = np.zeros(n, dtype=np.float64)
+    h[0] = 1.0
+    if n % 2 == 0:
+        h[1 : n // 2] = 2.0
+        h[n // 2] = 1.0
+    else:
+        h[1 : (n + 1) // 2] = 2.0
+    return np.fft.ifft(spectrum * h)
+
+
+def _masked_energy_ratio(power: np.ndarray, mask: np.ndarray) -> float:
+    """Return the fraction of spectrum energy covered by a boolean mask."""
+    total = float(np.sum(power))
+    if total <= _EPS:
+        return 0.0
+    return float(np.sum(power[mask]) / total)
 
 
 def normalize_windows(windows: np.ndarray, mode: NormalizationMode) -> np.ndarray:
@@ -107,19 +135,46 @@ def extract_window_feature_vector(window: np.ndarray) -> np.ndarray:
     """
     arr = _validate_1d_signal(window).astype(np.float64, copy=False)
     centered = arr - arr.mean()
+    analytic = _analytic_signal(centered)
 
     time_energy = float(np.mean(arr**2))
-    envelope = np.abs(hilbert(centered))
+    envelope = np.abs(analytic)
     envelope_energy = float(np.mean(envelope**2))
 
     spectrum = np.abs(np.fft.rfft(centered)) ** 2
     total_spectrum_energy = float(np.sum(spectrum))
     freqs = np.fft.rfftfreq(centered.size, d=1.0)
-    band_mask = (freqs >= _BAND_RATIO_LO) & (freqs <= _BAND_RATIO_HI)
-    band_energy = float(np.sum(spectrum[band_mask]))
-    band_energy_ratio = band_energy / max(total_spectrum_energy, _EPS)
+    safe_total_spectrum_energy = max(total_spectrum_energy, _EPS)
+    band_energy_ratio = _masked_energy_ratio(
+        spectrum,
+        (freqs >= _BAND_RATIO_LO) & (freqs <= _BAND_RATIO_HI),
+    )
 
-    phase = np.unwrap(np.angle(hilbert(centered)))
+    nyquist = float(freqs[-1]) if freqs.size > 0 else 0.5
+    norm_freqs = freqs / max(nyquist, _EPS)
+    low_band_energy_ratio = _masked_energy_ratio(spectrum, norm_freqs < (1.0 / 3.0))
+    mid_band_energy_ratio = _masked_energy_ratio(
+        spectrum,
+        (norm_freqs >= (1.0 / 3.0)) & (norm_freqs < (2.0 / 3.0)),
+    )
+    high_band_energy_ratio = _masked_energy_ratio(spectrum, norm_freqs >= (2.0 / 3.0))
+    spectral_weights = spectrum / safe_total_spectrum_energy
+    spectral_centroid = float(np.sum(norm_freqs * spectral_weights))
+    spectral_bandwidth = float(
+        np.sqrt(np.sum(((norm_freqs - spectral_centroid) ** 2) * spectral_weights))
+    )
+    spectrum_safe = spectrum + _EPS
+    spectral_flatness = float(
+        np.exp(np.mean(np.log(spectrum_safe))) / max(float(np.mean(spectrum_safe)), _EPS)
+    )
+    spectral_entropy = 0.0
+    if spectrum.size > 1:
+        entropy_denom = max(float(np.log(spectrum.size)), _EPS)
+        spectral_entropy = float(
+            -np.sum(spectral_weights * np.log(spectral_weights + _EPS)) / entropy_denom
+        )
+
+    phase = np.unwrap(np.angle(analytic))
     phase_var = float(np.var(phase))
 
     rms = float(np.sqrt(max(time_energy, 0.0)))
@@ -137,6 +192,13 @@ def extract_window_feature_vector(window: np.ndarray) -> np.ndarray:
             std,
             crest_factor,
             rms,
+            low_band_energy_ratio,
+            mid_band_energy_ratio,
+            high_band_energy_ratio,
+            spectral_centroid,
+            spectral_bandwidth,
+            spectral_flatness,
+            spectral_entropy,
         ],
         dtype=np.float32,
     )

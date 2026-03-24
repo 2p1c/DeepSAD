@@ -66,6 +66,7 @@ def _apply_feature_norm(feat_vec: np.ndarray, feature_norm: dict | None) -> np.n
         # Backward compatibility with older checkpoints.
         center = np.asarray(feature_norm["mean"], dtype=np.float32)
         scale = np.asarray(feature_norm["std"], dtype=np.float32)
+    scale = np.maximum(scale, float(feature_norm.get("eps", 1e-8)))
 
     if center.ndim != 1 or scale.ndim != 1:
         raise ValueError("feature_norm center/scale must be 1D vectors.")
@@ -93,6 +94,7 @@ def main() -> None:
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     feature_norm = checkpoint.get("feature_norm")
+    checkpoint_feature_dim = checkpoint.get("feature_dim")
 
     data_agent = UltrasoundDataAgent(
         window_size=cfg.data.window_size,
@@ -117,11 +119,21 @@ def main() -> None:
     path_ids = test_batch["path_ids"]
 
     fusion_enabled = cfg.fusion.enabled and cfg.fusion.mode == "late"
-    if fusion_enabled and feature_norm:
-        if "center" in feature_norm:
-            feat_dim = int(len(feature_norm["center"]))
+    if fusion_enabled:
+        if checkpoint_feature_dim is not None:
+            feat_dim = int(checkpoint_feature_dim)
+        elif feature_norm:
+            if "center" in feature_norm:
+                feat_dim = int(len(feature_norm["center"]))
+            else:
+                feat_dim = int(len(feature_norm["mean"]))
         else:
-            feat_dim = int(len(feature_norm["mean"]))
+            feat_dim = int(cfg.fusion.feat_dim)
+        if feat_test_raw.shape[1] != feat_dim:
+            raise ValueError(
+                "feature dimension mismatch between checkpoint/config and extracted data: "
+                f"checkpoint/config dim={feat_dim}, data dim={feat_test_raw.shape[1]}"
+            )
     else:
         feat_dim = int(feat_test_raw.shape[1])
     feat_test = feat_test_raw

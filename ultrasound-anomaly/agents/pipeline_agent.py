@@ -16,6 +16,7 @@ import yaml
 from agents.data_agent import UltrasoundDataAgent
 from agents.eval_agent import EvaluationAgent
 from agents.model_agent import DeepSVDDAgent
+from utils.preprocessing import FEATURE_VECTOR_DIM
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -48,7 +49,7 @@ class FusionConfig:
     enabled: bool = False
     mode: str = "late"
     sources: list[str] = field(default_factory=lambda: ["time"])
-    feat_dim: int = 7
+    feat_dim: int = FEATURE_VECTOR_DIM
     feat_hidden_dim: int = 32
     dropout: float = 0.0
 
@@ -60,6 +61,12 @@ class TrainConfig:
     lr: float = 1e-3
     weight_decay: float = 1e-6
     device: str = "cpu"
+    var_reg_weight: float = 0.2
+    target_embedding_std: float = 0.01
+    var_reg_warmup_epochs: int = 5
+    collapse_std_threshold: float = 0.001
+    collapse_patience: int = 5
+    min_epochs: int = 10
 
 
 @dataclass
@@ -128,6 +135,18 @@ class PipelineConfig:
             raise ValueError("data.window_size and data.stride must be positive.")
         if self.train.batch_size <= 0 or self.train.epochs <= 0:
             raise ValueError("train.batch_size and train.epochs must be positive.")
+        if self.train.lr <= 0.0 or self.train.weight_decay < 0.0:
+            raise ValueError("train.lr must be positive and train.weight_decay must be non-negative.")
+        if self.train.var_reg_weight < 0.0:
+            raise ValueError("train.var_reg_weight must be non-negative.")
+        if self.train.target_embedding_std <= 0.0:
+            raise ValueError("train.target_embedding_std must be positive.")
+        if self.train.var_reg_warmup_epochs < 0:
+            raise ValueError("train.var_reg_warmup_epochs must be >= 0.")
+        if self.train.collapse_std_threshold <= 0.0:
+            raise ValueError("train.collapse_std_threshold must be positive.")
+        if self.train.collapse_patience <= 0 or self.train.min_epochs <= 0:
+            raise ValueError("train.collapse_patience and train.min_epochs must be positive.")
         if self.fusion.mode not in {"late", "mid", "gated", "early"}:
             raise ValueError("fusion.mode must be one of {'late', 'mid', 'gated', 'early'}.")
         if self.fusion.feat_dim <= 0 or self.fusion.feat_hidden_dim <= 0:
@@ -182,6 +201,7 @@ class PipelineAgent:
         if fusion_enabled:
             feature_norm = self._build_feature_norm(feat_train_raw)
             feat_train = self._apply_feature_norm(feat_train_raw, feature_norm)
+            cfg.fusion.feat_dim = int(feat_train.shape[1])
         train_loader = DataLoader(
             TensorDataset(torch.from_numpy(x_train), torch.from_numpy(feat_train)),
             batch_size=cfg.train.batch_size,
@@ -206,6 +226,12 @@ class PipelineAgent:
             weight_decay=cfg.train.weight_decay,
             device=device,
             log_interval=max(1, cfg.train.epochs // 10),
+            var_reg_weight=cfg.train.var_reg_weight,
+            target_embedding_std=cfg.train.target_embedding_std,
+            var_reg_warmup_epochs=cfg.train.var_reg_warmup_epochs,
+            collapse_std_threshold=cfg.train.collapse_std_threshold,
+            collapse_patience=cfg.train.collapse_patience,
+            min_epochs=cfg.train.min_epochs,
         )
 
         ckpt_dir = self._resolve_output_dir(cfg.output.ckpt_dir)
@@ -326,10 +352,12 @@ class PipelineAgent:
             raise ValueError(f"Expected a 2D feature matrix, got shape {feat.shape}.")
         if feat.size == 0:
             raise ValueError("Cannot build feature normalization stats from an empty feature matrix.")
+        if not np.isfinite(feat).all():
+            raise ValueError("Cannot build feature normalization stats from non-finite values.")
 
         mean = feat.mean(axis=0)
         std = feat.std(axis=0)
-        std = np.where(std < FEATURE_NORM_EPS, 1.0, std)
+        std = np.maximum(std, FEATURE_NORM_EPS)
         return {
             "method": "zscore",
             "mean": mean.astype(np.float32).tolist(),
@@ -353,6 +381,7 @@ class PipelineAgent:
             # Backward compatibility with older checkpoints.
             center = np.asarray(feature_norm["mean"], dtype=np.float32)
             scale = np.asarray(feature_norm["std"], dtype=np.float32)
+        scale = np.maximum(scale, float(feature_norm.get("eps", FEATURE_NORM_EPS)))
 
         if center.ndim != 1 or scale.ndim != 1:
             raise ValueError("feature_norm center/scale must be 1D vectors.")
