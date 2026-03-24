@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 import yaml
 
 from agents.data_agent import UltrasoundDataAgent
@@ -23,11 +23,31 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FEATURE_NORM_EPS = 1e-8
 
 
+class _TrainingWindowDataset(Dataset):
+    """Dictionary-style dataset so y travels through the training loader."""
+
+    def __init__(self, x: torch.Tensor, feat_vec: torch.Tensor, y: torch.Tensor) -> None:
+        self.x = x
+        self.feat_vec = feat_vec
+        self.y = y
+
+    def __len__(self) -> int:
+        return int(self.x.shape[0])
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        return {
+            "x": self.x[index],
+            "feat_vec": self.feat_vec[index],
+            "y": self.y[index],
+        }
+
+
 @dataclass
 class DataConfig:
     raw_dir: str = "data/raw"
     processed_dir: str = "data/processed"
     train_healthy_paths: list[str] = field(default_factory=list)
+    train_damaged_paths: list[str] = field(default_factory=list)
     test_healthy_paths: list[str] = field(default_factory=list)
     test_damaged_paths: list[str] = field(default_factory=list)
     window_size: int = 256
@@ -175,11 +195,13 @@ class PipelineAgent:
         )
 
         train_healthy_paths = self._expand_signal_paths(cfg.data.train_healthy_paths)
+        train_damaged_paths = self._expand_signal_paths(cfg.data.train_damaged_paths)
         test_healthy_paths = self._expand_signal_paths(cfg.data.test_healthy_paths)
         test_damaged_paths = self._expand_signal_paths(cfg.data.test_damaged_paths)
 
         splits = data_agent.make_splits(
             train_healthy_paths=train_healthy_paths,
+            train_damaged_paths=train_damaged_paths,
             test_healthy_paths=test_healthy_paths,
             test_damaged_paths=test_damaged_paths,
         )
@@ -194,6 +216,7 @@ class PipelineAgent:
         train_batch = data_agent.to_batch(train_samples)
         x_train = np.asarray(train_batch["x"], dtype=np.float32)
         feat_train_raw = np.asarray(train_batch["feat_vec"], dtype=np.float32)
+        y_train = np.asarray(train_batch["y"], dtype=np.int64)
 
         fusion_enabled = cfg.fusion.enabled and cfg.fusion.mode == "late"
         feature_norm = None
@@ -203,7 +226,11 @@ class PipelineAgent:
             feat_train = self._apply_feature_norm(feat_train_raw, feature_norm)
             cfg.fusion.feat_dim = int(feat_train.shape[1])
         train_loader = DataLoader(
-            TensorDataset(torch.from_numpy(x_train), torch.from_numpy(feat_train)),
+            _TrainingWindowDataset(
+                torch.from_numpy(x_train),
+                torch.from_numpy(feat_train),
+                torch.from_numpy(y_train),
+            ),
             batch_size=cfg.train.batch_size,
             shuffle=True,
             drop_last=False,
@@ -218,6 +245,7 @@ class PipelineAgent:
             fusion_feat_dim=fusion_feat_dim,
             fusion_feat_hidden_dim=cfg.fusion.feat_hidden_dim,
             fusion_dropout=cfg.fusion.dropout,
+            objective=cfg.model.svdd_objective,
         )
         history = model.fit(
             train_loader=train_loader,
@@ -248,6 +276,7 @@ class PipelineAgent:
             "config": asdict(cfg),
             "feature_dim": int(feat_train.shape[1]),
             "feature_norm": feature_norm,
+            "svdd_objective": cfg.model.svdd_objective,
         }
         torch.save(checkpoint, checkpoint_path)
 

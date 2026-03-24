@@ -186,9 +186,12 @@ class UltrasoundDataAgent:
         train_healthy_paths: Sequence[str | Path],
         test_healthy_paths: Sequence[str | Path],
         test_damaged_paths: Sequence[str | Path],
+        train_damaged_paths: Sequence[str | Path] | None = None,
     ) -> Dict[str, List[WindowSample]]:
         """Build leakage-safe train/test splits for Deep SVDD."""
         train_samples = self.build_samples(train_healthy_paths, label=0)
+        if train_damaged_paths:
+            train_samples += self.build_samples(train_damaged_paths, label=1)
         test_samples = self.build_samples(test_healthy_paths, label=0) + self.build_samples(
             test_damaged_paths, label=1
         )

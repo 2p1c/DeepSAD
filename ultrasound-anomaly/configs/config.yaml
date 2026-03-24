@@ -5,13 +5,15 @@ data:
   raw_dir: data/raw
   processed_dir: data/processed
   train_healthy_paths:
-    - 'E:\数据\260324\AL_plate\DeepSAD\PZT\complete\1\1_41_41_120k_620k_Avg10\data.mat'
+    - 'E:\数据\260324\TPS\complete\1\41_41_Avg10\data.mat'
+  train_damaged_paths:
+    - 'E:\数据\260324\TPS\test_damage\15_15_180k_620k_Filter\data(1).mat'
   test_healthy_paths:
-    - 'E:\数据\260324\AL_plate\DeepSAD\PZT\complete\2\41_41_Avg10_Filter_same_as_Laser\data.mat'
+    - 'E:\数据\260324\TPS\complete\2\41_41_Avg10\data.mat'
   test_damaged_paths:
-    - 'E:\数据\260324\AL_plate\DeepSAD\PZT\damaged\test_damage\data.mat'
-  window_size: 1000
-  stride: 1000
+    - 'E:\数据\260324\TPS\test_damage\23_23_Avg10\data.mat'
+  window_size: 300
+  stride: 100
   normalization: zscore  # zscore|minmax
   split_by: path
 
@@ -19,7 +21,7 @@ model:
   embedding_dim: 128
   input_channels: 1
   hidden_channels: [16, 32, 64]
-  svdd_objective: one-class
+  svdd_objective: deepsad
 
 fusion:
   enabled: true
@@ -31,7 +33,7 @@ fusion:
 
 train:
   batch_size: 64
-  epochs: 50
+  epochs: 40
   lr: 0.001
   weight_decay: 1.0e-5
   device: cpu
