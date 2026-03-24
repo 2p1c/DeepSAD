@@ -19,6 +19,7 @@ from agents.model_agent import DeepSVDDAgent
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+FEATURE_NORM_EPS = 1e-8
 
 
 @dataclass
@@ -173,7 +174,14 @@ class PipelineAgent:
 
         train_batch = data_agent.to_batch(train_samples)
         x_train = np.asarray(train_batch["x"], dtype=np.float32)
-        feat_train = np.asarray(train_batch["feat_vec"], dtype=np.float32)
+        feat_train_raw = np.asarray(train_batch["feat_vec"], dtype=np.float32)
+
+        fusion_enabled = cfg.fusion.enabled and cfg.fusion.mode == "late"
+        feature_norm = None
+        feat_train = feat_train_raw
+        if fusion_enabled:
+            feature_norm = self._build_feature_norm(feat_train_raw)
+            feat_train = self._apply_feature_norm(feat_train_raw, feature_norm)
         train_loader = DataLoader(
             TensorDataset(torch.from_numpy(x_train), torch.from_numpy(feat_train)),
             batch_size=cfg.train.batch_size,
@@ -181,12 +189,13 @@ class PipelineAgent:
             drop_last=False,
         )
 
+        fusion_feat_dim = int(feat_train.shape[1]) if fusion_enabled else int(cfg.fusion.feat_dim)
         model = DeepSVDDAgent(
             window_size=cfg.data.window_size,
             embedding_dim=cfg.model.embedding_dim,
             hidden_channels=cfg.model.hidden_channels,
-            fusion_enabled=cfg.fusion.enabled and cfg.fusion.mode == "late",
-            fusion_feat_dim=cfg.fusion.feat_dim,
+            fusion_enabled=fusion_enabled,
+            fusion_feat_dim=fusion_feat_dim,
             fusion_feat_hidden_dim=cfg.fusion.feat_hidden_dim,
             fusion_dropout=cfg.fusion.dropout,
         )
@@ -211,6 +220,8 @@ class PipelineAgent:
             "model_state_dict": model.state_dict(),
             "center_c": model.center_c.detach().cpu(),
             "config": asdict(cfg),
+            "feature_dim": int(feat_train.shape[1]),
+            "feature_norm": feature_norm,
         }
         torch.save(checkpoint, checkpoint_path)
 
@@ -224,6 +235,8 @@ class PipelineAgent:
                 "window_size": int(cfg.data.window_size),
                 "stride": int(cfg.data.stride),
                 "normalization": cfg.data.normalization,
+                "feature_dim": int(feat_train.shape[1]),
+                "feature_norm": feature_norm,
             },
             "history": history,
             "summary": {
@@ -237,7 +250,10 @@ class PipelineAgent:
         if test_samples:
             test_batch = data_agent.to_batch(test_samples)
             x_test = np.asarray(test_batch["x"], dtype=np.float32)
-            feat_test = np.asarray(test_batch["feat_vec"], dtype=np.float32)
+            feat_test_raw = np.asarray(test_batch["feat_vec"], dtype=np.float32)
+            feat_test = feat_test_raw
+            if fusion_enabled and feature_norm is not None:
+                feat_test = self._apply_feature_norm(feat_test_raw, feature_norm)
             y_test = np.asarray(test_batch["y"], dtype=np.int64)
             test_path_ids = test_batch["path_ids"]
             test_scores = model.score_samples(
@@ -302,6 +318,50 @@ class PipelineAgent:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
+
+    @staticmethod
+    def _build_feature_norm(feat_vec: np.ndarray) -> dict[str, list[float] | float]:
+        feat = np.asarray(feat_vec, dtype=np.float32)
+        if feat.ndim != 2:
+            raise ValueError(f"Expected a 2D feature matrix, got shape {feat.shape}.")
+        if feat.size == 0:
+            raise ValueError("Cannot build feature normalization stats from an empty feature matrix.")
+
+        mean = feat.mean(axis=0)
+        std = feat.std(axis=0)
+        std = np.where(std < FEATURE_NORM_EPS, 1.0, std)
+        return {
+            "method": "zscore",
+            "mean": mean.astype(np.float32).tolist(),
+            "std": std.astype(np.float32).tolist(),
+            "eps": float(FEATURE_NORM_EPS),
+        }
+
+    @staticmethod
+    def _apply_feature_norm(feat_vec: np.ndarray, feature_norm: dict[str, Any]) -> np.ndarray:
+        feat = np.asarray(feat_vec, dtype=np.float32)
+        if feat.ndim != 2:
+            raise ValueError(f"Expected a 2D feature matrix, got shape {feat.shape}.")
+        if not feature_norm:
+            return feat
+
+        method = str(feature_norm.get("method", "zscore"))
+        if method == "robust_iqr":
+            center = np.asarray(feature_norm["center"], dtype=np.float32)
+            scale = np.asarray(feature_norm["scale"], dtype=np.float32)
+        else:
+            # Backward compatibility with older checkpoints.
+            center = np.asarray(feature_norm["mean"], dtype=np.float32)
+            scale = np.asarray(feature_norm["std"], dtype=np.float32)
+
+        if center.ndim != 1 or scale.ndim != 1:
+            raise ValueError("feature_norm center/scale must be 1D vectors.")
+        if feat.shape[1] != center.shape[0] or feat.shape[1] != scale.shape[0]:
+            raise ValueError(
+                "feature_norm dimension mismatch: "
+                f"feature dim={feat.shape[1]}, center dim={center.shape[0]}, scale dim={scale.shape[0]}"
+            )
+        return (feat - center) / scale
 
 
 __all__ = ["PipelineConfig", "PipelineAgent"]

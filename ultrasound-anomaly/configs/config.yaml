@@ -4,9 +4,12 @@ seed: 42
 data:
   raw_dir: data/raw
   processed_dir: data/processed
-  train_healthy_paths: []
-  test_healthy_paths: []
-  test_damaged_paths: []
+  train_healthy_paths:
+    - 'E:\数据\260324\AL_plate\DeepSAD\PZT\complete\1\1_41_41_120k_620k_Avg10\data.mat'
+  test_healthy_paths:
+    - 'E:\数据\260324\AL_plate\DeepSAD\PZT\complete\2\41_41_Avg10_Filter_same_as_Laser\data.mat'
+  test_damaged_paths:
+    - 'E:\数据\260324\AL_plate\DeepSAD\PZT\damaged\test_damage\data.mat'
   window_size: 256
   stride: 128
   normalization: zscore  # zscore|minmax
@@ -19,10 +22,10 @@ model:
   svdd_objective: one-class
 
 fusion:
-  enabled: false
+  enabled: true
   mode: late  # late|mid|gated|early
   sources: [time]
-  feat_dim: 7
+  feat_dim: 8
   feat_hidden_dim: 32
   dropout: 0.0
 

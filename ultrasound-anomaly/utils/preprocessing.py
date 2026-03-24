@@ -20,6 +20,7 @@ FEATURE_VECTOR_NAMES = (
     "mean_abs",
     "std",
     "crest_factor",
+    "rms",
 )
 FEATURE_VECTOR_DIM = len(FEATURE_VECTOR_NAMES)
 
@@ -121,9 +122,9 @@ def extract_window_feature_vector(window: np.ndarray) -> np.ndarray:
     phase = np.unwrap(np.angle(hilbert(centered)))
     phase_var = float(np.var(phase))
 
+    rms = float(np.sqrt(max(time_energy, 0.0)))
     mean_abs = float(np.mean(np.abs(arr)))
     std = float(np.std(arr))
-    rms = float(np.sqrt(max(time_energy, 0.0)))
     crest_factor = float(np.max(np.abs(arr)) / max(rms, _EPS))
 
     return np.array(
@@ -135,6 +136,7 @@ def extract_window_feature_vector(window: np.ndarray) -> np.ndarray:
             mean_abs,
             std,
             crest_factor,
+            rms,
         ],
         dtype=np.float32,
     )

@@ -51,6 +51,32 @@ def _expand_signal_paths(paths: list[str]) -> list[Path]:
     return expanded
 
 
+def _apply_feature_norm(feat_vec: np.ndarray, feature_norm: dict | None) -> np.ndarray:
+    feat = np.asarray(feat_vec, dtype=np.float32)
+    if feat.ndim != 2:
+        raise ValueError(f"Expected a 2D feature matrix, got shape {feat.shape}.")
+    if not feature_norm:
+        return feat
+
+    method = str(feature_norm.get("method", "zscore"))
+    if method == "robust_iqr":
+        center = np.asarray(feature_norm["center"], dtype=np.float32)
+        scale = np.asarray(feature_norm["scale"], dtype=np.float32)
+    else:
+        # Backward compatibility with older checkpoints.
+        center = np.asarray(feature_norm["mean"], dtype=np.float32)
+        scale = np.asarray(feature_norm["std"], dtype=np.float32)
+
+    if center.ndim != 1 or scale.ndim != 1:
+        raise ValueError("feature_norm center/scale must be 1D vectors.")
+    if feat.shape[1] != center.shape[0] or feat.shape[1] != scale.shape[0]:
+        raise ValueError(
+            "feature_norm dimension mismatch: "
+            f"feature dim={feat.shape[1]}, center dim={center.shape[0]}, scale dim={scale.shape[0]}"
+        )
+    return (feat - center) / scale
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate Deep SVDD model.")
     parser.add_argument("--config", default="configs/config.yaml", help="Path to config YAML")
@@ -66,26 +92,7 @@ def main() -> None:
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
-
-    model = DeepSVDDAgent(
-        window_size=cfg.data.window_size,
-        embedding_dim=cfg.model.embedding_dim,
-        hidden_channels=cfg.model.hidden_channels,
-        fusion_enabled=cfg.fusion.enabled and cfg.fusion.mode == "late",
-        fusion_feat_dim=cfg.fusion.feat_dim,
-        fusion_feat_hidden_dim=cfg.fusion.feat_hidden_dim,
-        fusion_dropout=cfg.fusion.dropout,
-    )
-    try:
-        model.load_state_dict(checkpoint["model_state_dict"], strict=True)
-    except RuntimeError:
-        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-    model.eval()
-
-    if "center_c" in checkpoint:
-        center = np.asarray(checkpoint["center_c"], dtype=np.float32).reshape(-1)
-    else:
-        center = model.center_c.detach().cpu().numpy().reshape(-1)
+    feature_norm = checkpoint.get("feature_norm")
 
     data_agent = UltrasoundDataAgent(
         window_size=cfg.data.window_size,
@@ -105,9 +112,41 @@ def main() -> None:
 
     test_batch = data_agent.to_batch(test_samples)
     x_test = np.asarray(test_batch["x"], dtype=np.float32)
-    feat_test = np.asarray(test_batch["feat_vec"], dtype=np.float32)
+    feat_test_raw = np.asarray(test_batch["feat_vec"], dtype=np.float32)
     y_test = np.asarray(test_batch["y"], dtype=np.int64)
     path_ids = test_batch["path_ids"]
+
+    fusion_enabled = cfg.fusion.enabled and cfg.fusion.mode == "late"
+    if fusion_enabled and feature_norm:
+        if "center" in feature_norm:
+            feat_dim = int(len(feature_norm["center"]))
+        else:
+            feat_dim = int(len(feature_norm["mean"]))
+    else:
+        feat_dim = int(feat_test_raw.shape[1])
+    feat_test = feat_test_raw
+    if fusion_enabled and feature_norm is not None:
+        feat_test = _apply_feature_norm(feat_test_raw, feature_norm)
+
+    model = DeepSVDDAgent(
+        window_size=cfg.data.window_size,
+        embedding_dim=cfg.model.embedding_dim,
+        hidden_channels=cfg.model.hidden_channels,
+        fusion_enabled=fusion_enabled,
+        fusion_feat_dim=feat_dim,
+        fusion_feat_hidden_dim=cfg.fusion.feat_hidden_dim,
+        fusion_dropout=cfg.fusion.dropout,
+    )
+    try:
+        model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    except RuntimeError:
+        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    model.eval()
+
+    if "center_c" in checkpoint:
+        center = np.asarray(checkpoint["center_c"], dtype=np.float32).reshape(-1)
+    else:
+        center = model.center_c.detach().cpu().numpy().reshape(-1)
 
     device = torch.device(cfg.train.device)
     model = model.to(device)
